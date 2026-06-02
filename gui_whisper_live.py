@@ -27,8 +27,15 @@ HAS_PYANNOTE    = _has("pyannote.audio")
 # ── Constants ──────────────────────────────────────────────────────────────────
 
 SAMPLE_RATE    = 16000
-CHUNK_SECONDS  = 10
 SILENCE_RMS    = 0.005
+
+# 即時切割策略：不再固定 N 秒硬切（會切在字詞中間、丟失上下文），
+# 改成「VAD 引導的自然斷句」——累積到 MIN 後，一偵測到停頓（尾端靜音）就切，
+# 切點落在句子間隙不斷字；若講者一直不停頓，最多累積到 MAX 強制切，避免延遲無限拉長。
+MIN_CHUNK_SECONDS = 4.0    # 最短累積秒數，避免切太碎而丟失上下文
+MAX_CHUNK_SECONDS = 15.0   # 最長累積秒數，避免一直不停頓導致延遲爆掉
+SILENCE_TAIL_SEC  = 0.6    # 尾端達這麼長的靜音即視為自然斷句點，可安全切割
+CONTEXT_PROMPT_CHARS = 180  # 跨段落保留的上下文長度（Whisper prompt 上限約 224 token）
 
 WHISPER_MODELS = ["tiny", "base", "small", "medium", "large-v2", "large-v3", "large-v3-turbo", "turbo"]
 LANGUAGES      = ["auto", "zh", "en", "ja", "fr", "de", "es", "ko", "ru", "it"]
@@ -147,6 +154,7 @@ class LiveTranscriber:
         self._stop         = threading.Event()
         self._audio_q      = queue.Queue()
         self._buffer       = np.array([], dtype=np.float32)
+        self._context_prompt = ""   # 上一段的尾句，餵給下一段當上下文以提升一致性
         self._whisper      = None
         self._diarize_pipe = None
         self._speaker_map  = {}
@@ -201,6 +209,7 @@ class LiveTranscriber:
             transcribe_audio,
             path_or_hf_repo=repo,
             language=self.language,
+            initial_prompt=self._context_prompt or None,
             verbose=False,
         )
         raw = [
@@ -208,6 +217,10 @@ class LiveTranscriber:
             for s in result.get("segments", [])
             if s["text"].strip()
         ]
+        # 保留本段尾句當作下一段的上下文，讓專有名詞／人名／同音字能延續消歧義
+        spoken = " ".join(t for _, _, t in raw).strip()
+        if spoken:
+            self._context_prompt = (self._context_prompt + " " + spoken).strip()[-CONTEXT_PROMPT_CHARS:]
         return remap_timestamps(raw, offset_map)
 
     def _assign_speakers(self, audio: np.ndarray,
@@ -272,7 +285,15 @@ class LiveTranscriber:
                     except queue.Empty:
                         continue
 
-                    if len(self._buffer) < SAMPLE_RATE * CHUNK_SECONDS:
+                    buf_len = len(self._buffer) / SAMPLE_RATE
+                    if buf_len < MIN_CHUNK_SECONDS:
+                        continue
+
+                    # 在自然停頓（尾端靜音）處切割，讓切點落在句子間隙而非字詞中間；
+                    # 若一直沒停頓則累積到 MAX 才強制切，避免延遲無限拉長。
+                    tail = self._buffer[-int(SILENCE_TAIL_SEC * SAMPLE_RATE):]
+                    tail_silent = np.sqrt(np.mean(tail ** 2)) < SILENCE_RMS
+                    if buf_len < MAX_CHUNK_SECONDS and not tail_silent:
                         continue
 
                     audio = self._buffer.copy()

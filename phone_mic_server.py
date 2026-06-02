@@ -290,6 +290,7 @@ class PhoneMicTranscriber:
         self._chunk_q: queue.Queue = queue.Queue()
         self._whisper = None
         self._wav_file = None
+        self._context_prompt = ""   # 上一段尾句，餵給下一段當上下文以提升一致性
         self.last_scene: str = ""   # 手機輸入的記者會名稱，供存檔用
 
     def start(self):
@@ -407,13 +408,20 @@ class PhoneMicTranscriber:
                 transcribe_audio,
                 path_or_hf_repo=self._whisper,
                 language=self.language,
+                initial_prompt=self._context_prompt or None,
                 verbose=False,
             )
+            texts: list[str] = []
             for seg in result.get("segments", []):
                 text = seg["text"].strip()
                 if text:
+                    texts.append(text)
                     _get_server(self.port).broadcast(text)
                     self.on_segment(text, None)
+            # 保留本段尾句當下一段上下文，讓跨段的專有名詞／人名延續消歧義
+            spoken = " ".join(texts).strip()
+            if spoken:
+                self._context_prompt = (self._context_prompt + " " + spoken).strip()[-180:]
 
         except Exception as e:
             self.on_error(f"轉錄錯誤：{e}")
