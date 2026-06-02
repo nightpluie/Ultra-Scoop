@@ -1,0 +1,31 @@
+# 虛擬環境
+.venv/
+venv/
+env/
+
+# Python 快取
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Whisper 模型（體積太大，不上傳）
+models/
+*.bin
+*.pt
+
+# 系統檔案
+.DS_Store
+Thumbs.db
+
+# 個人設定（含 API key，每台電腦各自保留，更新時不覆蓋）
+config.json
+config.local.json
+config.json.bak
+
+# 手機麥克風自簽 SSL 憑證（執行時自動產生，各機不同）
+ssl_cert.pem
+ssl_key.pem
+
+# 寫作風格與參考資料（商業 know-how，不公開；請私下傳給使用者放入 skills/）
+skills/

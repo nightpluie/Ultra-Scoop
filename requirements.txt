@@ -1,0 +1,15 @@
+anthropic
+sounddevice
+mlx-whisper
+imageio-ffmpeg
+silero-vad
+soundfile
+numpy
+pdfplumber
+python-docx
+openpyxl
+flask
+pyOpenSSL
+qrcode[pil]
+Pillow
+customtkinter
