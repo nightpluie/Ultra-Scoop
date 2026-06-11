@@ -7,6 +7,7 @@ __all__ = [
     "OK_FG", "ERR_FG", "WARN_FG", "INFO_FG",
     "FT", "FT_BOLD", "FT_BIG", "FT_SM", "FT_MONO", "FT_ARTICLE",
     "COL_INPUT", "COL_PROCESS", "COL_OUTPUT",
+    "COL_INPUT_HOVER", "COL_PROCESS_HOVER", "COL_OUTPUT_HOVER",
 ]
 
 # ── dark theme palette ────────────────────────────────────────────────────────
@@ -41,6 +42,15 @@ FT_MONO    = ("Menlo", 11)
 FT_ARTICLE = ("PingFang TC", 14)
 
 # ── column color assignments (semantic) ───────────────────────────────────────
+# 色彩規則（v3.4）：
+#   1. 欄位色只用於該欄的「主要行動」按鈕（全介面最多三顆實心彩鈕）
+#   2. 其餘按鈕一律 ghost（描邊灰底）
+#   3. ACCENT_PURPLE 專屬「AI 輔助小工具」（修正錯字／翻成中文）的文字色
+#   4. ACCENT_RED 僅用於錄音狀態
 COL_INPUT   = ACCENT_AMBER   # 暖色：採集原始素材
 COL_PROCESS = ACCENT_BLUE    # 冷色：AI 分析處理
-COL_OUTPUT  = "#4CAF50"      # 綠色：準備發布
+COL_OUTPUT  = ACCENT_GREEN   # 綠色：準備發布（與 ACCENT_GREEN 統一，全程式單一綠）
+
+COL_INPUT_HOVER   = "#A87548"
+COL_PROCESS_HOVER = "#4A7A9E"
+COL_OUTPUT_HOVER  = "#4D8560"

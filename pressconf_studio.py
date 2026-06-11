@@ -291,7 +291,7 @@ class PressConfStudio:
 
         self._status_var = tk.StringVar(value="就緒")
         ctk.CTkLabel(bar, textvariable=self._status_var,
-                     font=FT_SM, text_color=ACCENT_AMBER,
+                     font=FT_SM, text_color=TEXT_PRI,
                      anchor="w").pack(side="left", padx=10)
 
         ctk.CTkLabel(bar, text="Designed by Chen-Yu TANG",
@@ -306,7 +306,7 @@ class PressConfStudio:
         ] if not ok]
         if missing:
             ctk.CTkLabel(bar, text=f"未安裝：{', '.join(missing)}",
-                         font=FT_SM, text_color=ACCENT_AMBER
+                         font=FT_SM, text_color=WARN_FG
                          ).pack(side="right", padx=10)
 
     # ── 3-column main layout ─────────────────────────────────────────────────
@@ -381,7 +381,7 @@ class PressConfStudio:
             variable=self._src_var, command=self._switch_source,
             font=FT_SM, height=30,
             fg_color=BG_PANEL,
-            selected_color=COL_INPUT, selected_hover_color="#A87548",
+            selected_color=COL_INPUT, selected_hover_color=COL_INPUT_HOVER,
             unselected_color=BG_PANEL, unselected_hover_color=BORDER,
             text_color=TEXT_PRI)
         self._src_seg.pack(fill="x", pady=(0, 4))
@@ -416,13 +416,14 @@ class PressConfStudio:
                            ("載入", self._load_transcript),
                            ("儲存", self._save_transcript)]:
             self._ghost_btn(tools, label, cmd).pack(side="left", padx=2)
+        # AI 輔助小工具統一以紫色文字識別（規則 3）
         self._correct_btn = self._ghost_btn(
             tools, "修正錯字", self._correct_transcript,
-            width=68, text_color=ACCENT_GREEN)
+            width=68, text_color=ACCENT_PURPLE)
         self._correct_btn.pack(side="left", padx=2)
         self._trans_btn = self._ghost_btn(
             tools, "翻成中文", self._translate_transcript,
-            width=68, text_color=ACCENT_BLUE)
+            width=68, text_color=ACCENT_PURPLE)
         self._trans_btn.pack(side="left", padx=2)
 
         # ── Transcript text area ──────────────────────────────────────────
@@ -516,7 +517,7 @@ class PressConfStudio:
         ar2.pack(fill="x", padx=8, pady=(2, 8))
         self._audio_btn = ctk.CTkButton(
             ar2, text="開始轉錄", width=80, height=28,
-            font=FT_SM, fg_color=COL_INPUT, hover_color="#A87548",
+            font=FT_SM, fg_color=COL_INPUT, hover_color=COL_INPUT_HOVER,
             text_color="#FFFFFF", command=self._audio_transcribe)
         self._audio_btn.pack(side="left")
         self._audio_prog = ctk.CTkProgressBar(
@@ -536,7 +537,7 @@ class PressConfStudio:
         drop = ctk.CTkButton(
             f, text="點擊上傳附件　PDF / Word / Excel / TXT", height=32,
             font=FT_SM, fg_color=BG_INPUT, hover_color=BORDER,
-            text_color=ACCENT_BLUE, border_width=1, border_color=BORDER,
+            text_color=TEXT_PRI, border_width=1, border_color=BORDER,
             command=self._file_browse)
         drop.pack(fill="x", padx=8, pady=(8, 2))
 
@@ -649,7 +650,7 @@ class PressConfStudio:
         # ── Generate button ───────────────────────────────────────────────
         self._gen_btn = ctk.CTkButton(
             body, text="生成報導", height=38, font=FT_BOLD,
-            fg_color=COL_PROCESS, hover_color="#4A7A9E",
+            fg_color=COL_PROCESS, hover_color=COL_PROCESS_HOVER,
             text_color="#FFFFFF", command=self._generate)
         self._gen_btn.pack(fill="x", pady=(0, 2))
 
@@ -676,7 +677,7 @@ class PressConfStudio:
         # ── Check button ──────────────────────────────────────────────────
         self._chk_btn = ctk.CTkButton(
             body, text="開始查核", height=36, font=FT_BOLD,
-            fg_color=COL_PROCESS, hover_color="#4A7A9E",
+            fg_color=COL_PROCESS, hover_color=COL_PROCESS_HOVER,
             text_color="#FFFFFF", command=self._verify)
         self._chk_btn.pack(fill="x", pady=(0, 2))
 
@@ -692,15 +693,17 @@ class PressConfStudio:
         # ── Mark + Fix buttons ─────────────────────────────────────────────
         chk_btns = ctk.CTkFrame(body, fg_color="transparent")
         chk_btns.pack(fill="x", pady=(4, 4))
+        # 標記問題＝輔助檢視 → ghost；一鍵修正＝查核流程收尾 → 處理藍（規則 1、2）
         self._mark_chk_btn = ctk.CTkButton(
             chk_btns, text="標記問題  →", height=28,
-            font=FT_SM, fg_color=ACCENT_AMBER, hover_color="#A87548",
-            text_color="#FFFFFF", text_color_disabled=TEXT_DIM,
+            font=FT_SM, fg_color=BG_INPUT, hover_color=BORDER,
+            text_color=TEXT_PRI, text_color_disabled=TEXT_DIM,
+            border_width=1, border_color=BORDER,
             state="disabled", command=self._mark_issues_in_final)
         self._mark_chk_btn.pack(side="left", fill="x", expand=True, padx=(0, 2))
         self._fix_chk_btn = ctk.CTkButton(
             chk_btns, text="一鍵修正", height=28,
-            font=FT_SM, fg_color=COL_OUTPUT, hover_color="#3D8B42",
+            font=FT_SM, fg_color=COL_PROCESS, hover_color=COL_PROCESS_HOVER,
             text_color="#FFFFFF", text_color_disabled=TEXT_DIM,
             state="disabled", command=self._auto_fix_issues)
         self._fix_chk_btn.pack(side="left", fill="x", expand=True, padx=(2, 0))
@@ -757,7 +760,7 @@ class PressConfStudio:
         # Not packed initially — _toggle_sidebar controls this
         self._col3_main_btn = ctk.CTkButton(
             self._col3_tab_frame, text="主稿", font=FT_SM,
-            fg_color=COL_OUTPUT, hover_color="#3D8B42",
+            fg_color=COL_OUTPUT, hover_color=COL_OUTPUT_HOVER,
             text_color="#FFFFFF", corner_radius=4, height=26, width=60,
             command=lambda: self._col3_switch_tab("main"))
         self._col3_main_btn.pack(side="left", padx=(4, 2), pady=5)
@@ -835,7 +838,7 @@ class PressConfStudio:
                            ("DOCX", self._save_docx)]:
             ctk.CTkButton(eb, text=label, width=52, height=26,
                           font=FT_SM, fg_color=COL_OUTPUT,
-                          hover_color="#3D8B42", text_color="#FFFFFF",
+                          hover_color=COL_OUTPUT_HOVER, text_color="#FFFFFF",
                           command=cmd).pack(side="left", padx=(0, 3))
         ctk.CTkButton(eb, text="清除", width=44, height=26,
                       font=FT_SM, fg_color=BG_INPUT, hover_color=BORDER,
@@ -1533,7 +1536,7 @@ class PressConfStudio:
             win.destroy()
 
         ctk.CTkButton(win, text="完成", height=34, font=FT_BOLD,
-                      fg_color=ACCENT_BLUE, hover_color="#4A7A9E",
+                      fg_color=ACCENT_BLUE, hover_color=COL_PROCESS_HOVER,
                       text_color="#FFFFFF", command=_close
                       ).pack(side="bottom", fill="x", padx=16, pady=14)
         win.protocol("WM_DELETE_WINDOW", _close)
