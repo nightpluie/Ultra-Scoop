@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
 from __future__ import annotations
 """
-ULTRA SCOOP  v3.0
+ULTRA SCOOP  v3.4
 Mixer Layout: 輸入 → 處理 → 成稿
+v3.4: 介面簡化——設定集中至「⚙ 設定」對話框、輸入來源改為分頁切換、
+      查核結果點擊跳轉、錄音備份自動清理
 """
 
-import sys, os, re, datetime, threading, json, math
+import sys, os, re, datetime, threading, json, math, time
 import tkinter as tk
 from tkinter import filedialog, messagebox
 from tkinter.scrolledtext import ScrolledText
@@ -19,7 +21,7 @@ except ImportError:
 # ── paths ─────────────────────────────────────────────────────────────────────
 SCRIPT_DIR  = os.path.dirname(os.path.abspath(__file__))
 WHISPER_DIR = SCRIPT_DIR
-SKILL_PATH  = os.path.join(SCRIPT_DIR, "skills", "report-economic-stats.md")
+SKILL_PATH  = os.path.join(SCRIPT_DIR, "skills", "report-tcy", "report-tcy.md")
 CONFIG_PATH = os.path.join(SCRIPT_DIR, "config.json")
 
 # ── ffmpeg：系統沒裝就改用 pip 自帶版本，確保轉錄功能可用 ──────────────────────
@@ -35,12 +37,17 @@ def _has(m):
     try: __import__(m); return True
     except ImportError: return False
 
-HAS_ANTHROPIC      = _has("anthropic")
-HAS_SOUNDDEVICE    = _has("sounddevice")
+HAS_SOUNDDEVICE = _has("sounddevice")
 HAS_MLX_WHISPER = _has("mlx_whisper")
-HAS_PDFPLUMBER     = _has("pdfplumber")
-HAS_DOCX           = _has("docx")
-HAS_OPENPYXL       = _has("openpyxl")
+
+# ── 拆分模組（v3.4）───────────────────────────────────────────────────────────
+from app_theme import *
+from text_utils import (parse_single_output, parse_dual_output, parse_file,
+                        strip_markdown, extract_numbers,
+                        HAS_PDFPLUMBER, HAS_DOCX)
+from claude_api import (HAS_ANTHROPIC, claude_generate, claude_check,
+                        claude_correct, claude_translate)
+from ui_helpers import _add_copy_menu, _add_entry_menu, _dark_text
 
 try:
     sys.path.insert(0, WHISPER_DIR)
@@ -62,42 +69,6 @@ try:
 except Exception:
     HAS_PHONE_MIC = False
 
-# ── dark theme palette ────────────────────────────────────────────────────────
-BG          = "#0F1923"
-BG_SURFACE  = "#182636"
-BG_PANEL    = "#1E3044"
-BG_INPUT    = "#0D1820"
-BORDER      = "#2A3E52"
-BORDER_LT   = "#345068"
-
-ACCENT_BLUE   = "#5B8DB8"
-ACCENT_GREEN  = "#5B9E72"
-ACCENT_PURPLE = "#8E78C0"
-ACCENT_AMBER  = "#C0895A"
-ACCENT_RED    = "#D32F2F"
-
-TEXT_PRI     = "#D0D6DE"
-TEXT_SEC     = "#6B7F8E"
-TEXT_DIM     = "#3D5060"
-
-OK_FG    = "#6DBF88"
-ERR_FG   = "#E07070"
-WARN_FG  = "#D4A832"
-INFO_FG  = "#5B8DB8"
-
-# ── typography ────────────────────────────────────────────────────────────────
-FT         = ("PingFang TC", 13)
-FT_BOLD    = ("PingFang TC", 13, "bold")
-FT_BIG     = ("PingFang TC", 15, "bold")
-FT_SM      = ("PingFang TC", 11)
-FT_MONO    = ("Menlo", 11)
-FT_ARTICLE = ("PingFang TC", 14)
-
-# ── column color assignments (semantic) ───────────────────────────────────────
-COL_INPUT   = ACCENT_AMBER   # 暖色：採集原始素材
-COL_PROCESS = ACCENT_BLUE    # 冷色：AI 分析處理
-COL_OUTPUT  = "#4CAF50"      # 綠色：準備發布
-
 # ── config ────────────────────────────────────────────────────────────────────
 def load_config() -> dict:
     try:
@@ -115,469 +86,11 @@ def save_config(data: dict):
     except Exception:
         pass
 
-# ── output parsers ────────────────────────────────────────────────────────────
-_TITLE_RE = re.compile(r'^\[建議標題\]：(.+)', re.MULTILINE)
-
-def _extract_title_body(chunk: str):
-    chunk = chunk.strip()
-    m = _TITLE_RE.search(chunk)
-    if m:
-        title = m.group(1).strip()
-        body  = chunk[m.end():].strip()
-    else:
-        body  = chunk
-        title = ""
-    return title, body
-
-def parse_single_output(text: str):
-    return _extract_title_body(text)
-
-def parse_dual_output(text: str):
-    main_m = re.search(r'===主稿開始===(.*?)===主稿結束===', text, re.DOTALL)
-    side_m = re.search(r'===配稿開始===(.*?)===配稿結束===', text, re.DOTALL)
-    mt, mb = _extract_title_body(main_m.group(1)) if main_m else ("", text)
-    st, sb = _extract_title_body(side_m.group(1)) if side_m else ("", "")
-    return mt, mb, st, sb
-
-# ── file parser ───────────────────────────────────────────────────────────────
-def parse_file(path: str) -> str:
-    ext = os.path.splitext(path)[1].lower()
-    try:
-        if ext == ".pdf":
-            if not HAS_PDFPLUMBER:
-                return "[需安裝 pdfplumber：pip install pdfplumber]"
-            import pdfplumber
-            out = []
-            with pdfplumber.open(path) as pdf:
-                for pg in pdf.pages:
-                    t = pg.extract_text() or ""
-                    if t: out.append(t)
-                    for tbl in pg.extract_tables():
-                        for row in tbl:
-                            if row:
-                                out.append("  ".join(str(c) for c in row if c))
-            return "\n".join(out)
-        elif ext in (".docx", ".doc"):
-            if not HAS_DOCX:
-                return "[需安裝 python-docx：pip install python-docx]"
-            from docx import Document
-            return "\n".join(p.text for p in Document(path).paragraphs if p.text)
-        elif ext in (".xlsx", ".xls"):
-            if not HAS_OPENPYXL:
-                return "[需安裝 openpyxl：pip install openpyxl]"
-            import openpyxl
-            wb = openpyxl.load_workbook(path, data_only=True)
-            lines = []
-            for ws in wb.worksheets:
-                lines.append(f"[ {ws.title} ]")
-                for row in ws.iter_rows(values_only=True):
-                    if any(v is not None for v in row):
-                        lines.append("  ".join(str(v) for v in row if v is not None))
-            return "\n".join(lines)
-        elif ext == ".txt":
-            with open(path, encoding="utf-8", errors="replace") as f:
-                return f.read()
-        else:
-            return f"[不支援格式：{ext}]"
-    except Exception as e:
-        return f"[解析失敗：{e}]"
-
-
-def strip_markdown(text: str) -> str:
-    text = re.sub(r'^#{1,6}\s+', '', text, flags=re.MULTILINE)
-    text = re.sub(r'\*{1,3}([^*\n]+)\*{1,3}', r'\1', text)
-    text = re.sub(r'`([^`]+)`', r'\1', text)
-    text = re.sub(r'```.*?```', '', text, flags=re.DOTALL)
-    text = re.sub(r'^[-*_]{3,}\s*$', '', text, flags=re.MULTILINE)
-    text = re.sub(r'^\s*[-*+]\s+', '', text, flags=re.MULTILINE)
-    text = re.sub(r'^\s*\d+\.\s+', '', text, flags=re.MULTILINE)
-    text = re.sub(r'^\s*>\s?', '', text, flags=re.MULTILINE)
-    text = re.sub(r'\n{3,}', '\n\n', text)
-    return text.strip()
-
-
-def extract_numbers(text: str) -> set:
-    return set(re.findall(r"-?\d+(?:,\d{3})*(?:\.\d+)?%?", text))
-
-
-# ── skill / Claude ────────────────────────────────────────────────────────────
-def load_skill(path: str = None) -> str:
-    target = os.path.expanduser(path or SKILL_PATH)
-    try:
-        with open(target, encoding="utf-8") as f:
-            return f.read()
-    except FileNotFoundError:
-        return (
-            "你是一位專業新聞記者。請依倒金字塔結構撰寫報導："
-            "數據先行、官員姓名職稱明確引述、歷史比較標示清楚。"
-        )
-
-
-def claude_generate(transcript, files_text, model, interviewee, main_angle,
-                    sidebar_mode, side_angle, api_key, skill_path,
-                    on_token_main, on_token_side, on_done, on_error):
-    """Generate article(s) and stream tokens directly to output boxes.
-
-    sidebar_mode=True: state-machine routes tokens to on_token_main / on_token_side
-    sidebar_mode=False: all tokens go to on_token_main
-    """
-    if not HAS_ANTHROPIC:
-        on_error("尚未安裝 anthropic SDK（pip install anthropic）")
-        on_done(); return
-    if not api_key:
-        api_key = os.environ.get("ANTHROPIC_API_KEY", "")
-    if not api_key:
-        on_error("請在生成報導設定欄填入 API Key")
-        on_done(); return
-
-    def _run():
-        try:
-            import anthropic
-            skill = load_skill(skill_path)
-            parts = []
-            if interviewee.strip():
-                parts.append(f"【受訪者 / 發言人】\n{interviewee}")
-            if transcript.strip():
-                parts.append(f"【記者會逐字稿】\n{transcript}")
-            if files_text.strip():
-                parts.append(f"【官方新聞稿 / 統計附件】\n{files_text}")
-            if not parts:
-                on_error("請先錄製逐字稿或上傳附件")
-                on_done(); return
-
-            fmt = (
-                "【格式要求】以純文字撰寫，禁止使用任何 Markdown 符號"
-                "（##、**、*、- 列表、數字列表、``` 等），段落間用空行分隔。"
-                "結尾不加「（記者名／地點）」等署名行，稿件到最後一段自然收束即可。"
-            )
-
-            if sidebar_mode:
-                main_hint = (f"【主稿角度】{main_angle}" if main_angle.strip()
-                             else "【主稿角度】請自行從素材中判斷最適合的主稿報導角度")
-                side_hint = (f"【配稿角度】{side_angle}" if side_angle.strip()
-                             else "【配稿角度】請自行從素材中找出與主稿不同、可互補的配稿角度")
-                parts.append(
-                    f"{main_hint}\n"
-                    f"{side_hint}\n\n"
-                    "請同時產出主稿與配稿。配稿須在第一段以 1-2 句簡要引入主稿的核心事實"
-                    "作為背景，其後聚焦主稿未涵蓋的面向與角度。\n\n"
-                    "請嚴格依照以下固定格式輸出，勿更改分隔符號：\n\n"
-                    "===主稿開始===\n"
-                    "[建議標題]：（填入建議標題）\n"
-                    "（主稿內文）\n"
-                    "===主稿結束===\n\n"
-                    "===配稿開始===\n"
-                    "[建議標題]：（填入建議標題）\n"
-                    "（配稿內文）\n"
-                    "===配稿結束===\n\n"
-                    + fmt
-                )
-            else:
-                main_hint = (f"【主稿角度】{main_angle}" if main_angle.strip()
-                             else "【主稿角度】請自行從素材中判斷最適合的報導角度")
-                parts.append(
-                    f"{main_hint}\n\n"
-                    "請依以上素材撰寫一篇完整的新聞報導。\n"
-                    "第一行請輸出：[建議標題]：（填入建議標題）\n"
-                    "第二行起輸出內文。\n\n"
-                    + fmt
-                )
-
-            client = anthropic.Anthropic(api_key=api_key)
-
-            if sidebar_mode:
-                # ── 即時路由狀態機 ────────────────────────────────────────
-                DELIMS = [
-                    ("===主稿開始===", "NONE",    "IN_MAIN"),
-                    ("===主稿結束===", "IN_MAIN",  "BETWEEN"),
-                    ("===配稿開始===", "BETWEEN",  "IN_SIDE"),
-                    ("===配稿結束===", "IN_SIDE",  "DONE"),
-                ]
-                MAX_D = max(len(d) for d, _, _ in DELIMS)
-                _st = {"mode": "NONE", "buf": ""}
-
-                def _emit(text, mode):
-                    if not text:
-                        return
-                    if mode == "IN_MAIN":
-                        on_token_main(text)
-                    elif mode == "IN_SIDE" and on_token_side:
-                        on_token_side(text)
-
-                def _route(chunk):
-                    _st["buf"] += chunk
-                    while True:
-                        buf = _st["buf"]
-                        found = False
-                        for delim, _, to_s in DELIMS:
-                            idx = buf.find(delim)
-                            if idx >= 0:
-                                _emit(buf[:idx], _st["mode"])
-                                _st["mode"] = to_s
-                                _st["buf"] = buf[idx + len(delim):]
-                                found = True
-                                break
-                        if found:
-                            continue
-                        # No full delimiter found; hold back possible partial match
-                        safe = len(_st["buf"]) - MAX_D
-                        if safe > 0:
-                            _emit(_st["buf"][:safe], _st["mode"])
-                            _st["buf"] = _st["buf"][safe:]
-                        break
-
-                with client.messages.stream(
-                    model=model, max_tokens=3000, system=skill,
-                    messages=[{"role": "user", "content": "\n\n".join(parts)}],
-                ) as stream:
-                    for chunk in stream.text_stream:
-                        _route(chunk)
-                _emit(_st["buf"], _st["mode"])  # flush remainder
-
-            else:
-                with client.messages.stream(
-                    model=model, max_tokens=2048, system=skill,
-                    messages=[{"role": "user", "content": "\n\n".join(parts)}],
-                ) as stream:
-                    for chunk in stream.text_stream:
-                        on_token_main(chunk)
-
-        except Exception as e:
-            on_error(str(e))
-        finally:
-            on_done()
-
-    threading.Thread(target=_run, daemon=True).start()
-
-
-def claude_check(article, source, api_key, on_result, on_done, on_error):
-    if not HAS_ANTHROPIC:
-        on_error("尚未安裝 anthropic SDK"); on_done(); return
-    if not api_key:
-        api_key = os.environ.get("ANTHROPIC_API_KEY", "")
-    if not api_key:
-        on_error("請設定 API Key"); on_done(); return
-
-    def _run():
-        try:
-            import anthropic
-            system = (
-                "你是專業的新聞編輯兼事實查核員。\n"
-                "請逐一檢查【新聞稿】，找出以下三類問題：\n"
-                "1. typo — 錯別字、語音辨識錯字（人名、機構名、專有名詞拼寫錯誤）\n"
-                "2. mismatch — 數字、百分比、日期、姓名職稱與【原始素材】不符\n"
-                "3. unsourced — 稿件中的事實或數據在【原始素材】中完全找不到出處\n\n"
-                "以 JSON 陣列回傳，每項格式：\n"
-                "{\"type\":\"typo|mismatch|unsourced\","
-                "\"value\":\"稿件中的原文片段\","
-                "\"suggestion\":\"建議修正值（unsourced 留空字串）\","
-                "\"issue\":\"問題說明\"}\n\n"
-                "重要：value 必須是稿件中能精確搜尋到的原文片段。"
-                "suggestion 只在有明確正確答案時才填寫，無法確定時留空字串。"
-                "完全無問題則回傳 []。"
-            )
-            client = anthropic.Anthropic(api_key=api_key)
-            resp = client.messages.create(
-                model="claude-haiku-4-5-20251001",
-                max_tokens=2048,
-                system=system,
-                messages=[{"role": "user", "content":
-                    f"【新聞稿】\n{article}\n\n【原始素材】\n{source}"}],
-            )
-            raw = resp.content[0].text.strip()
-            m   = re.search(r"\[.*\]", raw, re.DOTALL)
-            on_result(json.loads(m.group(0)) if m else [])
-        except Exception as e:
-            on_error(str(e))
-        finally:
-            on_done()
-
-    threading.Thread(target=_run, daemon=True).start()
-
-
-def claude_correct(text, api_key, on_done, on_error, context=""):
-    """Use Haiku to correct Whisper transcription errors (names, numbers, terms).
-
-    Splits long transcripts into chunks to avoid max_tokens truncation.
-    context: optional press conference background (scene name + interviewee).
-    """
-    if not HAS_ANTHROPIC:
-        on_error("尚未安裝 anthropic SDK（pip install anthropic）")
-        return
-    if not api_key:
-        api_key = os.environ.get("ANTHROPIC_API_KEY", "")
-    if not api_key:
-        on_error("請設定 API Key")
-        return
-
-    CHUNK_CHARS = 3000  # ~3000 Chinese chars ≈ 3000-6000 tokens, safe under 8096 output limit
-
-    def _split_chunks(t: str) -> list:
-        lines = t.split('\n')
-        chunks, cur, cur_len = [], [], 0
-        for line in lines:
-            line_len = len(line) + 1
-            if cur_len + line_len > CHUNK_CHARS and cur:
-                chunks.append('\n'.join(cur))
-                cur, cur_len = [line], line_len
-            else:
-                cur.append(line)
-                cur_len += line_len
-        if cur:
-            chunks.append('\n'.join(cur))
-        return chunks
-
-    def _run():
-        try:
-            import anthropic
-            client = anthropic.Anthropic(api_key=api_key)
-
-            system = (
-                "你是專業的新聞編輯。"
-                "以下是語音辨識產生的逐字稿，可能含有辨識錯誤（人名、機構名、專有名詞、數字）。"
-                "請只修正明顯的辨識錯字，不要改動句子結構、語氣或增減任何內容。"
-                "保留原有的時間戳記、說話者標記與段落格式。"
-                "直接輸出修正後的全文，不加任何說明或備注。"
-            )
-            if context.strip():
-                system += (
-                    f"\n\n【本場記者會背景資訊】\n{context.strip()}\n"
-                    "請優先以此資訊校正人名、機構名與專有名詞的辨識錯誤。"
-                )
-
-            chunks = _split_chunks(text)
-            corrected_parts = []
-
-            for chunk in chunks:
-                resp = client.messages.create(
-                    model="claude-haiku-4-5-20251001",
-                    max_tokens=8096,
-                    system=system,
-                    messages=[{
-                        "role": "user",
-                        "content": f"請校正以下逐字稿的辨識錯字：\n\n{chunk}"
-                    }]
-                )
-                if resp.stop_reason == "max_tokens":
-                    # 單段仍超限（極端情況），保留原始內容
-                    corrected_parts.append(chunk)
-                else:
-                    corrected_parts.append(resp.content[0].text.strip())
-
-            on_done('\n'.join(corrected_parts))
-        except Exception as e:
-            on_error(str(e))
-
-    threading.Thread(target=_run, daemon=True).start()
-
-
-def claude_translate(text, api_key, on_done, on_error):
-    """Translate transcript to Traditional Chinese using Haiku (cheapest model)."""
-    if not HAS_ANTHROPIC:
-        on_error("尚未安裝 anthropic SDK（pip install anthropic）")
-        return
-    if not api_key:
-        api_key = os.environ.get("ANTHROPIC_API_KEY", "")
-    if not api_key:
-        on_error("請設定 API Key")
-        return
-
-    def _run():
-        try:
-            import anthropic
-            client = anthropic.Anthropic(api_key=api_key)
-            resp = client.messages.create(
-                model="claude-haiku-4-5-20251001",
-                max_tokens=8096,
-                system=(
-                    "你是專業翻譯員，擅長將各國語言翻譯成繁體中文。"
-                    "保留原文的段落結構與說話者標記（如「主席：」「記者：」「[時間戳]」等），"
-                    "直接輸出翻譯結果，不加任何說明或備注。"
-                ),
-                messages=[{
-                    "role": "user",
-                    "content": f"請將以下逐字稿翻譯成繁體中文：\n\n{text}"
-                }]
-            )
-            on_done(resp.content[0].text.strip())
-        except Exception as e:
-            on_error(str(e))
-
-    threading.Thread(target=_run, daemon=True).start()
-
-
-# ── context menu helpers ──────────────────────────────────────────────────────
-def _add_copy_menu(widget):
-    menu = tk.Menu(widget, tearoff=0,
-                   bg=BG_PANEL, fg=TEXT_PRI,
-                   activebackground=ACCENT_BLUE, activeforeground=TEXT_PRI,
-                   font=FT_SM, bd=0)
-    menu.add_command(label="複製",     command=lambda: widget.event_generate("<<Copy>>"))
-    menu.add_command(label="貼上",     command=lambda: widget.event_generate("<<Paste>>"))
-    menu.add_command(label="剪下",     command=lambda: widget.event_generate("<<Cut>>"))
-    menu.add_separator()
-    menu.add_command(label="全部選取", command=lambda: _select_all(widget))
-    def _popup(e):
-        try: menu.tk_popup(e.x_root, e.y_root)
-        finally: menu.grab_release()
-    widget.bind("<Button-2>",         _popup)
-    widget.bind("<Control-Button-1>", _popup)
-    widget.bind("<Command-a>", lambda e: (_select_all(widget), "break"))
-    widget.bind("<Command-c>", lambda e: (widget.event_generate("<<Copy>>"),  "break"))
-    widget.bind("<Command-x>", lambda e: (widget.event_generate("<<Cut>>"),   "break"))
-    widget.bind("<Command-v>", lambda e: (widget.event_generate("<<Paste>>"), "break"))
-
-
-def _select_all(widget):
-    widget.tag_add(tk.SEL, "1.0", tk.END)
-    widget.mark_set(tk.INSERT, "1.0")
-    widget.see(tk.INSERT)
-    return "break"
-
-
-def _add_entry_menu(e: ctk.CTkEntry):
-    """為 CTkEntry 加入右鍵選單與 Cmd 快捷鍵（複製/貼上/剪下/全選）。"""
-    inner = e._entry  # CTkEntry 內部的 tk.Entry
-
-    menu = tk.Menu(inner, tearoff=0,
-                   bg=BG_PANEL, fg=TEXT_PRI,
-                   activebackground=ACCENT_BLUE, activeforeground=TEXT_PRI,
-                   font=FT_SM, bd=0)
-    menu.add_command(label="複製", command=lambda: inner.event_generate("<<Copy>>"))
-    menu.add_command(label="貼上", command=lambda: inner.event_generate("<<Paste>>"))
-    menu.add_command(label="剪下", command=lambda: inner.event_generate("<<Cut>>"))
-    menu.add_separator()
-    menu.add_command(label="全選", command=lambda: inner.select_range(0, tk.END))
-
-    def _popup(ev):
-        try: menu.tk_popup(ev.x_root, ev.y_root)
-        finally: menu.grab_release()
-
-    inner.bind("<Button-2>",         _popup)
-    inner.bind("<Control-Button-1>", _popup)
-    inner.bind("<Command-a>", lambda ev: (inner.select_range(0, tk.END), "break"))
-    inner.bind("<Command-c>", lambda ev: (inner.event_generate("<<Copy>>"),  "break"))
-    inner.bind("<Command-x>", lambda ev: (inner.event_generate("<<Cut>>"),   "break"))
-    inner.bind("<Command-v>", lambda ev: (inner.event_generate("<<Paste>>"), "break"))
-
-
-def _dark_text(parent, height=8, font=FT, **kwargs):
-    """Create a dark-themed ScrolledText widget."""
-    text = ScrolledText(
-        parent, wrap="word", font=font, height=height,
-        bg=BG_INPUT, fg=TEXT_PRI,
-        insertbackground=TEXT_PRI,
-        selectbackground="#2A4A6A", selectforeground=TEXT_PRI,
-        relief="flat", bd=0, padx=8, pady=6,
-        **kwargs)
-    return text
-
-
 # ══════════════════════════════════════════════════════════════════════════════
 class PressConfStudio:
     def __init__(self, root: ctk.CTk):
         self.root = root
-        root.title("ULTRA SCOOP  v3.0")
+        root.title("ULTRA SCOOP  v3.4")
         sw, sh = root.winfo_screenwidth(), root.winfo_screenheight()
         w = min(int(sw * 0.95), 1900)
         h = min(sh - 110, 1020)
@@ -616,6 +129,15 @@ class PressConfStudio:
         self._remember_author = tk.BooleanVar(value=False)
         self._remember_key    = tk.BooleanVar(value=False)
 
+        # settings (managed via「⚙ 設定」dialog)
+        self._wmodel_var = tk.StringVar(value="large-v3-turbo")
+        self._lang_var   = tk.StringVar(value="zh")
+        self._gen_model  = tk.StringVar(value="claude-sonnet-4-6")
+        self._apikey_var = tk.StringVar()
+        self._settings_win = None
+        self._skill_lbl     = None
+        self._apikey_entry  = None
+
         # skill path
         self._skill_path_var = tk.StringVar(value=SKILL_PATH)
 
@@ -647,12 +169,66 @@ class PressConfStudio:
         self._apikey_var.trace_add("write", lambda *_: self._update_key_label())
         self._update_key_label()
 
+        # 首次使用：尚未設定 API Key 時自動開啟設定視窗引導
+        if not (self._apikey_var.get().strip()
+                or os.environ.get("ANTHROPIC_API_KEY")):
+            self.root.after(600, self._first_run_hint)
+
+        # 錄音備份清理檢查（避免 rec/ 無限增長佔滿磁碟）
+        self.root.after(1500, self._check_rec_cleanup)
+
+    def _first_run_hint(self):
+        self._status("尚未設定 API Key — 請在「⚙ 設定」填入後即可使用生成功能")
+        self._open_settings()
+
+    # ── rec/ 錄音備份清理 ────────────────────────────────────────────────────
+    REC_KEEP_DAYS = 30
+
+    def _check_rec_cleanup(self):
+        """啟動時檢查 rec/，詢問是否刪除超過保留天數的錄音備份。"""
+        rec_dir = os.path.join(SCRIPT_DIR, "rec")
+        if not os.path.isdir(rec_dir):
+            return
+        cutoff = time.time() - self.REC_KEEP_DAYS * 86400
+        old_files, total_bytes = [], 0
+        for dirpath, _, names in os.walk(rec_dir):
+            for fn in names:
+                if not fn.lower().endswith(".wav"):
+                    continue
+                path = os.path.join(dirpath, fn)
+                try:
+                    st = os.stat(path)
+                except OSError:
+                    continue
+                if st.st_mtime < cutoff:
+                    old_files.append(path)
+                    total_bytes += st.st_size
+        if not old_files:
+            return
+        mb = total_bytes / 1048576
+        if not messagebox.askyesno(
+                "清理錄音備份",
+                f"rec/ 資料夾有 {len(old_files)} 個超過 {self.REC_KEEP_DAYS} 天"
+                f"的錄音備份（約 {mb:.0f} MB）。\n\n"
+                "要刪除這些舊檔嗎？\n"
+                "（逐字稿文字備份存放在 log/，不受影響）"):
+            return
+        removed = 0
+        for path in old_files:
+            try:
+                os.remove(path)
+                removed += 1
+            except OSError:
+                pass
+        self._status(f"已清理 {removed} 個舊錄音備份（釋出約 {mb:.0f} MB）")
+
     # ── keyboard shortcuts ────────────────────────────────────────────────────
     def _bind_shortcuts(self):
         self.root.bind_all("<Command-g>",      lambda e: self._generate())
         self.root.bind_all("<Command-k>",      lambda e: self._verify())
         self.root.bind_all("<Command-s>",      lambda e: self._save_txt())
         self.root.bind_all("<Command-Return>", lambda e: self._generate())
+        self.root.bind_all("<Command-comma>",  lambda e: self._open_settings())
 
     # ── UI building ───────────────────────────────────────────────────────────
     def _build_ui(self):
@@ -672,7 +248,7 @@ class PressConfStudio:
         ctk.CTkLabel(bar, text="SCOOP",
                      font=("Arial Black", 26),
                      text_color=ACCENT_AMBER).pack(side="left", padx=(0, 6))
-        ctk.CTkLabel(bar, text="v3.0",
+        ctk.CTkLabel(bar, text="v3.4",
                      font=("Menlo", 9), text_color=TEXT_DIM
                      ).pack(side="left", padx=(0, 16), pady=(10, 0))
 
@@ -698,9 +274,14 @@ class PressConfStudio:
                      font=FT_SM, text_color=TEXT_DIM
                      ).pack(side="left", padx=(16, 0))
 
-        # API key status (right side)
+        # settings button + API key status (right side)
+        ctk.CTkButton(bar, text="⚙ 設定", width=72, height=30,
+                      font=FT_SM, fg_color=BG_INPUT, hover_color=BORDER,
+                      text_color=TEXT_PRI, border_width=1, border_color=BORDER,
+                      command=self._open_settings
+                      ).pack(side="right", padx=(0, 16))
         self._topbar_key_lbl = ctk.CTkLabel(bar, text="", font=FT_SM)
-        self._topbar_key_lbl.pack(side="right", padx=16)
+        self._topbar_key_lbl.pack(side="right", padx=12)
 
     def _build_statusbar(self):
         bar = ctk.CTkFrame(self.root, fg_color=BG_SURFACE, height=26,
@@ -765,6 +346,25 @@ class PressConfStudio:
                      anchor="w").pack(side="left", padx=12, pady=4)
         return hdr
 
+    def _make_combo(self, parent, variable, values, width=120):
+        """統一樣式的唯讀下拉選單。"""
+        return ctk.CTkComboBox(
+            parent, variable=variable, state="readonly", width=width,
+            values=values, font=FT_SM, dropdown_font=FT_SM,
+            fg_color=BG_INPUT, border_color=BORDER,
+            button_color=BG_PANEL, button_hover_color=BORDER_LT,
+            dropdown_fg_color=BG_PANEL, dropdown_hover_color=BORDER_LT,
+            text_color=TEXT_PRI)
+
+    def _ghost_btn(self, parent, text, command,
+                   width=40, height=26, text_color=TEXT_SEC):
+        """統一樣式的次要（描邊）按鈕。"""
+        return ctk.CTkButton(
+            parent, text=text, width=width, height=height,
+            font=FT_SM, fg_color=BG_INPUT, hover_color=BORDER,
+            text_color=text_color, border_width=1, border_color=BORDER,
+            command=command)
+
     # ══════════════════════════════════════════════════════════════════════════
     #  COLUMN 1 — 輸入素材
     # ══════════════════════════════════════════════════════════════════════════
@@ -773,81 +373,82 @@ class PressConfStudio:
         body = ctk.CTkFrame(parent, fg_color="transparent")
         body.pack(fill="both", expand=True, padx=6, pady=6)
 
-        # ── Recording controls ────────────────────────────────────────────
-        ctrl = ctk.CTkFrame(body, fg_color=BG_PANEL, corner_radius=6)
-        ctrl.pack(fill="x", pady=(0, 4))
+        # ── Source selector：一次只顯示一種輸入方式 ────────────────────────
+        self._active_src = "現場錄音"
+        self._src_var = tk.StringVar(value=self._active_src)
+        self._src_seg = ctk.CTkSegmentedButton(
+            body, values=["現場錄音", "手機麥克風", "音檔轉錄", "附件"],
+            variable=self._src_var, command=self._switch_source,
+            font=FT_SM, height=30,
+            fg_color=BG_PANEL,
+            selected_color=COL_INPUT, selected_hover_color="#A87548",
+            unselected_color=BG_PANEL, unselected_hover_color=BORDER,
+            text_color=TEXT_PRI)
+        self._src_seg.pack(fill="x", pady=(0, 4))
 
-        # Device row
-        self._r_dev = r_dev = ctk.CTkFrame(ctrl, fg_color="transparent")
-        r_dev.pack(fill="x", padx=8, pady=(6, 2))
+        self._src_panel = ctk.CTkFrame(body, fg_color=BG_PANEL,
+                                       corner_radius=6)
+        self._src_panel.pack(fill="x", pady=(0, 4))
+
+        self._src_frames = {
+            "現場錄音":   self._build_src_live(self._src_panel),
+            "手機麥克風": self._build_src_phone(self._src_panel),
+            "音檔轉錄":   self._build_src_audio(self._src_panel),
+            "附件":       self._build_src_files(self._src_panel),
+        }
+        self._src_frames[self._active_src].pack(fill="x")
+
+        # ── Shared recording feedback ─────────────────────────────────────
+        self._live_lbl = ctk.CTkLabel(body, text="", font=FT_SM,
+                                      text_color=TEXT_SEC)
+        self._live_lbl.pack(pady=(0, 2))
+        self._wave_canvas = tk.Canvas(body, height=24, bg=BG_INPUT,
+                                      highlightthickness=0)
+        self._wave_canvas.pack(fill="x", pady=(0, 4))
+
+        # ── Transcript toolbar ────────────────────────────────────────────
+        tools = ctk.CTkFrame(body, fg_color="transparent")
+        tools.pack(fill="x", pady=(0, 2))
+        ctk.CTkLabel(tools, text="逐字稿", font=FT_SM,
+                     text_color=TEXT_SEC).pack(side="left", padx=(2, 6))
+        for label, cmd in [("貼上", self._paste_transcript),
+                           ("清除", self._live_clear),
+                           ("載入", self._load_transcript),
+                           ("儲存", self._save_transcript)]:
+            self._ghost_btn(tools, label, cmd).pack(side="left", padx=2)
+        self._correct_btn = self._ghost_btn(
+            tools, "修正錯字", self._correct_transcript,
+            width=68, text_color=ACCENT_GREEN)
+        self._correct_btn.pack(side="left", padx=2)
+        self._trans_btn = self._ghost_btn(
+            tools, "翻成中文", self._translate_transcript,
+            width=68, text_color=ACCENT_BLUE)
+        self._trans_btn.pack(side="left", padx=2)
+
+        # ── Transcript text area ──────────────────────────────────────────
+        self._transcript = _dark_text(body, height=6)
+        self._transcript.pack(fill="both", expand=True)
+        for i, c in enumerate(SPEAKER_PALETTE):
+            self._transcript.tag_configure(f"spk{i}", foreground=c, font=FT_BOLD)
+        self._transcript.tag_configure("body", foreground=TEXT_PRI, font=FT)
+        _add_copy_menu(self._transcript)
+
+    # ── 來源分頁：各面板 ──────────────────────────────────────────────────
+    def _build_src_live(self, parent):
+        f = ctk.CTkFrame(parent, fg_color="transparent")
+
+        r_dev = ctk.CTkFrame(f, fg_color="transparent")
+        r_dev.pack(fill="x", padx=8, pady=(8, 2))
         ctk.CTkLabel(r_dev, text="輸入裝置", font=FT_SM,
                      text_color=TEXT_SEC).pack(side="left")
         self._dev_var = tk.StringVar()
-        self._dev_combo = ctk.CTkComboBox(
-            r_dev, variable=self._dev_var, state="readonly", width=180,
-            font=FT_SM, dropdown_font=FT_SM,
-            fg_color=BG_INPUT, border_color=BORDER,
-            button_color=BG_PANEL, button_hover_color=BORDER_LT,
-            dropdown_fg_color=BG_PANEL, dropdown_hover_color=BORDER_LT,
-            text_color=TEXT_PRI)
+        self._dev_combo = self._make_combo(r_dev, self._dev_var, [], width=180)
         self._dev_combo.pack(side="left", fill="x", expand=True, padx=(6, 4))
-        ctk.CTkButton(r_dev, text="重整", width=40, height=24,
-                      font=FT_SM, fg_color=BG_INPUT, hover_color=BORDER,
-                      text_color=TEXT_SEC, border_width=1, border_color=BORDER,
-                      command=self._refresh_devices).pack(side="left")
+        self._ghost_btn(r_dev, "重整", self._refresh_devices,
+                        height=24).pack(side="left")
 
-        # Model / Language / Phone row
-        r_mdl = ctk.CTkFrame(ctrl, fg_color="transparent")
-        r_mdl.pack(fill="x", padx=8, pady=2)
-        ctk.CTkLabel(r_mdl, text="模型", font=FT_SM,
-                     text_color=TEXT_SEC).pack(side="left")
-        self._wmodel_var = tk.StringVar(value="large-v3-turbo")
-        ctk.CTkComboBox(
-            r_mdl, variable=self._wmodel_var, state="readonly", width=90,
-            values=WHISPER_MODELS, font=FT_SM, dropdown_font=FT_SM,
-            fg_color=BG_INPUT, border_color=BORDER,
-            button_color=BG_PANEL, button_hover_color=BORDER_LT,
-            dropdown_fg_color=BG_PANEL, dropdown_hover_color=BORDER_LT,
-            text_color=TEXT_PRI).pack(side="left", padx=(4, 8))
-        ctk.CTkLabel(r_mdl, text="語言", font=FT_SM,
-                     text_color=TEXT_SEC).pack(side="left")
-        self._lang_var = tk.StringVar(value="zh")
-        ctk.CTkComboBox(
-            r_mdl, variable=self._lang_var, state="readonly", width=60,
-            values=LANGUAGES, font=FT_SM, dropdown_font=FT_SM,
-            fg_color=BG_INPUT, border_color=BORDER,
-            button_color=BG_PANEL, button_hover_color=BORDER_LT,
-            dropdown_fg_color=BG_PANEL, dropdown_hover_color=BORDER_LT,
-            text_color=TEXT_PRI).pack(side="left", padx=(4, 8))
-        ctk.CTkSwitch(r_mdl, text="手機麥克風", font=FT_SM,
-                      text_color=TEXT_SEC, variable=self._phone_mode,
-                      command=self._toggle_phone_mode,
-                      fg_color=BORDER, progress_color=ACCENT_BLUE,
-                      button_color=TEXT_SEC, button_hover_color=TEXT_PRI,
-                      width=36, height=18).pack(side="left")
-
-        # ── Phone mic panel (hidden by default) ───────────────────────────
-        self._phone_frame = ctk.CTkFrame(ctrl, fg_color=BG_INPUT,
-                                         corner_radius=4)
-        _pf_top = ctk.CTkFrame(self._phone_frame, fg_color="transparent")
-        _pf_top.pack(fill="x", padx=8, pady=(4, 0))
-        ctk.CTkLabel(_pf_top, text="手機瀏覽器開啟：",
-                     font=FT_SM, text_color=TEXT_SEC).pack(side="left")
-        self._phone_url_var = tk.StringVar(value="")
-        _url_lbl = ctk.CTkLabel(_pf_top, textvariable=self._phone_url_var,
-                                font=("Menlo", 9), text_color=ACCENT_BLUE,
-                                cursor="hand2")
-        _url_lbl.pack(side="left")
-        _url_lbl.bind("<Button-1>", lambda e: self._copy_phone_url())
-        ctk.CTkLabel(_pf_top, text="（點按複製）",
-                     font=FT_SM, text_color=TEXT_DIM).pack(side="left", padx=4)
-        self._qr_label = tk.Label(self._phone_frame, bg=BG_INPUT)
-        self._qr_label.pack(pady=(2, 4))
-
-        # ── Record / Stop buttons ─────────────────────────────────────────
-        btns_row = ctk.CTkFrame(ctrl, fg_color="transparent")
-        btns_row.pack(fill="x", padx=8, pady=(2, 4))
-
+        btns_row = ctk.CTkFrame(f, fg_color="transparent")
+        btns_row.pack(fill="x", padx=8, pady=(4, 8))
         self._start_btn = tk.Canvas(
             btns_row, width=42, height=42,
             bg=BG_PANEL, highlightthickness=1,
@@ -866,101 +467,53 @@ class PressConfStudio:
             12, 12, 30, 30, fill=TEXT_DIM, outline="")
         self._stop_btn.bind("<Button-1>", lambda e: self._live_stop()
                             if self._wave_active else None)
+        ctk.CTkLabel(btns_row, text="紅鈕開始錄音　方鈕停止",
+                     font=FT_SM, text_color=TEXT_DIM).pack(side="left", padx=6)
+        return f
 
-        ctk.CTkButton(btns_row, text="貼上", width=40, height=26,
-                      font=FT_SM, fg_color=BG_INPUT, hover_color=BORDER,
-                      text_color=TEXT_SEC, border_width=1, border_color=BORDER,
-                      command=self._paste_transcript).pack(side="left", padx=2)
-        ctk.CTkButton(btns_row, text="清除", width=40, height=26,
-                      font=FT_SM, fg_color=BG_INPUT, hover_color=BORDER,
-                      text_color=TEXT_SEC, border_width=1, border_color=BORDER,
-                      command=self._live_clear).pack(side="left", padx=2)
-        ctk.CTkButton(btns_row, text="載入", width=40, height=26,
-                      font=FT_SM, fg_color=BG_INPUT, hover_color=BORDER,
-                      text_color=TEXT_SEC, border_width=1, border_color=BORDER,
-                      command=self._load_transcript).pack(side="left", padx=2)
-        ctk.CTkButton(btns_row, text="儲存", width=40, height=26,
-                      font=FT_SM, fg_color=BG_INPUT, hover_color=BORDER,
-                      text_color=TEXT_SEC, border_width=1, border_color=BORDER,
-                      command=self._save_transcript).pack(side="left", padx=2)
-        self._correct_btn = ctk.CTkButton(
-            btns_row, text="校正", width=40, height=26,
-            font=FT_SM, fg_color=BG_INPUT, hover_color=BORDER,
-            text_color=ACCENT_GREEN, border_width=1, border_color=BORDER,
-            command=self._correct_transcript)
-        self._correct_btn.pack(side="left", padx=2)
-        self._trans_btn = ctk.CTkButton(
-            btns_row, text="翻譯", width=40, height=26,
-            font=FT_SM, fg_color=BG_INPUT, hover_color=BORDER,
-            text_color=ACCENT_BLUE, border_width=1, border_color=BORDER,
-            command=self._translate_transcript)
-        self._trans_btn.pack(side="left", padx=2)
+    def _build_src_phone(self, parent):
+        f = ctk.CTkFrame(parent, fg_color="transparent")
 
-        self._live_lbl = ctk.CTkLabel(ctrl, text="", font=FT_SM,
-                                      text_color=TEXT_SEC)
-        self._live_lbl.pack(padx=8, pady=(0, 2))
+        top = ctk.CTkFrame(f, fg_color="transparent")
+        top.pack(fill="x", padx=8, pady=(8, 0))
+        ctk.CTkLabel(top, text="手機瀏覽器開啟：", font=FT_SM,
+                     text_color=TEXT_SEC).pack(side="left")
+        self._phone_url_var = tk.StringVar(value="")
+        url_lbl = ctk.CTkLabel(top, textvariable=self._phone_url_var,
+                               font=("Menlo", 9), text_color=ACCENT_BLUE,
+                               cursor="hand2")
+        url_lbl.pack(side="left")
+        url_lbl.bind("<Button-1>", lambda e: self._copy_phone_url())
+        ctk.CTkLabel(top, text="（點按複製）", font=FT_SM,
+                     text_color=TEXT_DIM).pack(side="left", padx=4)
 
-        # ── Wave animation canvas ─────────────────────────────────────────
-        self._wave_canvas = tk.Canvas(ctrl, height=24, bg=BG_INPUT,
-                                      highlightthickness=0)
-        self._wave_canvas.pack(fill="x", padx=8, pady=(0, 6))
+        self._qr_label = tk.Label(f, bg=BG_PANEL)
+        self._qr_label.pack(pady=(4, 2))
 
-        # ── Transcript text area ──────────────────────────────────────────
-        self._transcript = _dark_text(body, height=6)
-        self._transcript.pack(fill="both", expand=True, pady=(0, 4))
-        for i, c in enumerate(SPEAKER_PALETTE):
-            self._transcript.tag_configure(f"spk{i}", foreground=c, font=FT_BOLD)
-        self._transcript.tag_configure("body", foreground=TEXT_PRI, font=FT)
-        _add_copy_menu(self._transcript)
+        bottom = ctk.CTkFrame(f, fg_color="transparent")
+        bottom.pack(fill="x", padx=8, pady=(0, 8))
+        ctk.CTkLabel(bottom, text="掃描後在手機網頁按「開始」即可錄音",
+                     font=FT_SM, text_color=TEXT_DIM).pack(side="left")
+        self._ghost_btn(bottom, "停止錄音",
+                        lambda: self._live_stop() if self._wave_active else None,
+                        width=72, height=24).pack(side="right")
+        return f
 
-        # ── Audio file section ────────────────────────────────────────────
-        aud_hdr = ctk.CTkFrame(body, fg_color=BG_PANEL, corner_radius=4,
-                               height=26)
-        aud_hdr.pack(fill="x", pady=(0, 2))
-        aud_hdr.pack_propagate(False)
-        ctk.CTkLabel(aud_hdr, text="音檔轉錄",
-                     font=FT_SM, text_color=TEXT_SEC
-                     ).pack(side="left", padx=8)
+    def _build_src_audio(self, parent):
+        f = ctk.CTkFrame(parent, fg_color="transparent")
 
-        aud_body = ctk.CTkFrame(body, fg_color=BG_PANEL, corner_radius=4)
-        aud_body.pack(fill="x", pady=(0, 4))
-
-        ar1 = ctk.CTkFrame(aud_body, fg_color="transparent")
-        ar1.pack(fill="x", padx=8, pady=(4, 2))
+        ar1 = ctk.CTkFrame(f, fg_color="transparent")
+        ar1.pack(fill="x", padx=8, pady=(8, 2))
         self._audio_name_var = tk.StringVar(value="尚未選擇音檔")
         ctk.CTkLabel(ar1, textvariable=self._audio_name_var,
                      font=FT_SM, text_color=TEXT_SEC, anchor="w"
                      ).pack(side="left", fill="x", expand=True)
-        ctk.CTkButton(ar1, text="選擇音檔", width=70, height=24,
-                      font=FT_SM, fg_color=BG_INPUT, hover_color=BORDER,
-                      text_color=TEXT_PRI, border_width=1, border_color=BORDER,
-                      command=self._audio_browse).pack(side="right")
+        self._ghost_btn(ar1, "選擇音檔", self._audio_browse,
+                        width=70, height=24,
+                        text_color=TEXT_PRI).pack(side="right")
 
-        ar_opt = ctk.CTkFrame(aud_body, fg_color="transparent")
-        ar_opt.pack(fill="x", padx=8, pady=2)
-        ctk.CTkLabel(ar_opt, text="模型", font=FT_SM,
-                     text_color=TEXT_SEC).pack(side="left")
-        self._audio_model_var = tk.StringVar(value="large-v3-turbo")
-        ctk.CTkComboBox(
-            ar_opt, variable=self._audio_model_var, state="readonly", width=90,
-            values=WHISPER_MODELS, font=FT_SM, dropdown_font=FT_SM,
-            fg_color=BG_INPUT, border_color=BORDER,
-            button_color=BG_PANEL, button_hover_color=BORDER_LT,
-            dropdown_fg_color=BG_PANEL, dropdown_hover_color=BORDER_LT,
-            text_color=TEXT_PRI).pack(side="left", padx=(4, 8))
-        ctk.CTkLabel(ar_opt, text="語言", font=FT_SM,
-                     text_color=TEXT_SEC).pack(side="left")
-        self._audio_lang_var = tk.StringVar(value="zh")
-        ctk.CTkComboBox(
-            ar_opt, variable=self._audio_lang_var, state="readonly", width=60,
-            values=LANGUAGES, font=FT_SM, dropdown_font=FT_SM,
-            fg_color=BG_INPUT, border_color=BORDER,
-            button_color=BG_PANEL, button_hover_color=BORDER_LT,
-            dropdown_fg_color=BG_PANEL, dropdown_hover_color=BORDER_LT,
-            text_color=TEXT_PRI).pack(side="left", padx=(4, 0))
-
-        ar2 = ctk.CTkFrame(aud_body, fg_color="transparent")
-        ar2.pack(fill="x", padx=8, pady=(2, 4))
+        ar2 = ctk.CTkFrame(f, fg_color="transparent")
+        ar2.pack(fill="x", padx=8, pady=(2, 8))
         self._audio_btn = ctk.CTkButton(
             ar2, text="開始轉錄", width=80, height=28,
             font=FT_SM, fg_color=COL_INPUT, hover_color="#A87548",
@@ -973,45 +526,62 @@ class PressConfStudio:
         self._audio_lbl = ctk.CTkLabel(ar2, text="", font=FT_SM,
                                        text_color=TEXT_SEC)
         self._audio_lbl.pack(side="left", padx=4)
+        ctk.CTkLabel(ar2, text="支援 MP3 / WAV / M4A / 影片檔",
+                     font=FT_SM, text_color=TEXT_DIM).pack(side="right")
+        return f
 
-        # ── Attachments section ───────────────────────────────────────────
-        att_hdr = ctk.CTkFrame(body, fg_color=BG_PANEL, corner_radius=4,
-                               height=26)
-        att_hdr.pack(fill="x", pady=(0, 2))
-        att_hdr.pack_propagate(False)
-        ctk.CTkLabel(att_hdr, text="附件上傳  PDF / Word / Excel / TXT",
-                     font=FT_SM, text_color=TEXT_SEC
-                     ).pack(side="left", padx=8)
-
-        att_body = ctk.CTkFrame(body, fg_color=BG_PANEL, corner_radius=4)
-        att_body.pack(fill="x")
+    def _build_src_files(self, parent):
+        f = ctk.CTkFrame(parent, fg_color="transparent")
 
         drop = ctk.CTkButton(
-            att_body, text="點擊上傳附件", height=32,
+            f, text="點擊上傳附件　PDF / Word / Excel / TXT", height=32,
             font=FT_SM, fg_color=BG_INPUT, hover_color=BORDER,
             text_color=ACCENT_BLUE, border_width=1, border_color=BORDER,
             command=self._file_browse)
-        drop.pack(fill="x", padx=6, pady=(6, 2))
+        drop.pack(fill="x", padx=8, pady=(8, 2))
 
         self._flist = tk.Listbox(
-            att_body, height=2, font=FT_SM,
+            f, height=2, font=FT_SM,
             bg=BG_INPUT, fg=TEXT_PRI,
             relief="flat", bd=0,
             selectmode=tk.SINGLE, activestyle="none",
             selectbackground="#2A4A6A", selectforeground=TEXT_PRI,
             highlightthickness=0)
-        self._flist.pack(fill="x", padx=6, pady=2)
+        self._flist.pack(fill="x", padx=8, pady=2)
         self._flist.bind("<Double-Button-1>", self._file_preview)
 
-        fb = ctk.CTkFrame(att_body, fg_color="transparent")
-        fb.pack(fill="x", padx=6, pady=(0, 6))
+        fb = ctk.CTkFrame(f, fg_color="transparent")
+        fb.pack(fill="x", padx=8, pady=(0, 8))
         for label, cmd in [("預覽", self._file_preview),
                            ("移除", self._file_remove),
                            ("清空", self._file_clear)]:
-            ctk.CTkButton(fb, text=label, width=40, height=22,
-                          font=FT_SM, fg_color=BG_INPUT, hover_color=BORDER,
-                          text_color=TEXT_SEC, border_width=1, border_color=BORDER,
-                          command=cmd).pack(side="left", padx=2)
+            self._ghost_btn(fb, label, cmd, height=22).pack(side="left", padx=2)
+        ctk.CTkLabel(fb, text="附件會連同逐字稿一起送給 AI 寫稿",
+                     font=FT_SM, text_color=TEXT_DIM).pack(side="right")
+        return f
+
+    def _switch_source(self, choice: str):
+        prev = self._active_src
+        if choice == prev:
+            return
+        if choice == "手機麥克風":
+            if not HAS_PHONE_MIC:
+                messagebox.showwarning("缺少套件",
+                    "請先執行安裝程式安裝 flask 套件後再使用手機麥克風功能")
+                self._src_var.set(prev)
+                return
+            if self._wave_active and not self._phone_mode.get():
+                messagebox.showwarning("錄音中",
+                    "請先停止現場錄音，再切換至手機麥克風")
+                self._src_var.set(prev)
+                return
+        if prev == "手機麥克風":
+            self._set_phone_mode(False)
+        self._src_frames[prev].pack_forget()
+        self._src_frames[choice].pack(fill="x")
+        self._active_src = choice
+        if choice == "手機麥克風":
+            self._set_phone_mode(True)
 
     # ══════════════════════════════════════════════════════════════════════════
     #  COLUMN 2 — 處理（生成報導 / 事實查核 Tab）
@@ -1056,7 +626,7 @@ class PressConfStudio:
 
         # Sidebar toggle
         self._sidebar_chk_row = r3 = ctk.CTkFrame(settings, fg_color="transparent")
-        r3.pack(fill="x", padx=8, pady=(2, 0))
+        r3.pack(fill="x", padx=8, pady=(2, 8))
         ctk.CTkCheckBox(r3, text="同時產出配稿", font=FT_SM,
                         text_color=TEXT_SEC, variable=self._sidebar_mode,
                         fg_color=BORDER, hover_color=BORDER_LT,
@@ -1066,7 +636,7 @@ class PressConfStudio:
         # Sidebar angle (hidden by default)
         self._sidebar_ctx_frame = ctk.CTkFrame(settings, fg_color="transparent")
         r4 = ctk.CTkFrame(self._sidebar_ctx_frame, fg_color="transparent")
-        r4.pack(fill="x", padx=8, pady=(0, 2))
+        r4.pack(fill="x", padx=8, pady=(0, 8))
         ctk.CTkLabel(r4, text="配稿角度", font=FT_SM, text_color=TEXT_SEC,
                      width=50, anchor="w").pack(side="left")
         self._side_angle_var = tk.StringVar()
@@ -1075,73 +645,6 @@ class PressConfStudio:
                           text_color=TEXT_PRI)
         e3.pack(side="left", fill="x", expand=True, padx=(4, 0))
         _add_entry_menu(e3)
-
-        # ── 進階設定 toggle ────────────────────────────────────────────────
-        self._adv_toggle_btn = ctk.CTkButton(
-            settings, text="⚙ 進階設定 ▾", font=FT_SM,
-            fg_color="transparent", hover_color=BORDER,
-            text_color=TEXT_SEC, anchor="w", height=24,
-            command=self._toggle_adv_settings)
-        self._adv_toggle_btn.pack(fill="x", padx=4, pady=(4, 4))
-
-        # ── Advanced settings (hidden by default) ─────────────────────────
-        self._adv_frame = ctk.CTkFrame(settings, fg_color="transparent")
-        # Not packed initially
-
-        # Model
-        r_mdl = ctk.CTkFrame(self._adv_frame, fg_color="transparent")
-        r_mdl.pack(fill="x", padx=8, pady=2)
-        ctk.CTkLabel(r_mdl, text="模型", font=FT_SM, text_color=TEXT_SEC,
-                     width=50, anchor="w").pack(side="left")
-        self._gen_model = tk.StringVar(value="claude-sonnet-4-6")
-        ctk.CTkComboBox(
-            r_mdl, variable=self._gen_model, state="readonly", width=200,
-            values=["claude-sonnet-4-6", "claude-opus-4-6",
-                    "claude-haiku-4-5-20251001"],
-            font=FT_SM, dropdown_font=FT_SM,
-            fg_color=BG_INPUT, border_color=BORDER,
-            button_color=BG_PANEL, button_hover_color=BORDER_LT,
-            dropdown_fg_color=BG_PANEL, dropdown_hover_color=BORDER_LT,
-            text_color=TEXT_PRI).pack(side="left", padx=(4, 0))
-
-        # API Key
-        r_key = ctk.CTkFrame(self._adv_frame, fg_color="transparent")
-        r_key.pack(fill="x", padx=8, pady=2)
-        ctk.CTkLabel(r_key, text="API Key", font=FT_SM, text_color=TEXT_SEC,
-                     width=50, anchor="w").pack(side="left")
-        self._apikey_var = tk.StringVar()
-        self._apikey_entry = ctk.CTkEntry(
-            r_key, textvariable=self._apikey_var, show="*",
-            font=("Menlo", 9), fg_color=BG_INPUT, border_color=BORDER,
-            text_color=TEXT_PRI)
-        self._apikey_entry.pack(side="left", fill="x", expand=True, padx=(4, 4))
-        _add_entry_menu(self._apikey_entry)
-        ctk.CTkButton(r_key, text="顯示", width=36, height=24,
-                      font=FT_SM, fg_color=BG_INPUT, hover_color=BORDER,
-                      text_color=TEXT_SEC, border_width=1, border_color=BORDER,
-                      command=self._toggle_apikey_visibility).pack(side="left")
-
-        r_mem = ctk.CTkFrame(self._adv_frame, fg_color="transparent")
-        r_mem.pack(fill="x", padx=8, pady=(0, 2))
-        ctk.CTkCheckBox(r_mem, text="記憶 API Key", font=FT_SM,
-                        text_color=TEXT_SEC, variable=self._remember_key,
-                        fg_color=BORDER, hover_color=BORDER_LT,
-                        checkmark_color=TEXT_PRI,
-                        command=self._save_prefs).pack(side="left")
-
-        # Skill
-        r_skill = ctk.CTkFrame(self._adv_frame, fg_color="transparent")
-        r_skill.pack(fill="x", padx=8, pady=(0, 6))
-        ctk.CTkLabel(r_skill, text="技能包", font=FT_SM, text_color=TEXT_SEC,
-                     width=50, anchor="w").pack(side="left")
-        self._skill_lbl = ctk.CTkLabel(r_skill, text="", font=FT_SM,
-                                       text_color=OK_FG, anchor="w")
-        self._skill_lbl.pack(side="left", fill="x", expand=True, padx=4)
-        ctk.CTkButton(r_skill, text="選擇", width=36, height=24,
-                      font=FT_SM, fg_color=BG_INPUT, hover_color=BORDER,
-                      text_color=TEXT_SEC, border_width=1, border_color=BORDER,
-                      command=self._browse_skill).pack(side="left")
-        self._update_skill_label()
 
         # ── Generate button ───────────────────────────────────────────────
         self._gen_btn = ctk.CTkButton(
@@ -1290,6 +793,9 @@ class PressConfStudio:
         self._out_box.tag_configure("hl_unsourced",
                                     background="#2A3040", foreground="#8899AA",
                                     underline=True)
+        # 查核結果點擊跳轉時的暫時聚焦標記
+        self._out_box.tag_configure("hl_focus",
+                                    background="#2A4A6A", foreground="#FFFFFF")
         _add_copy_menu(self._out_box)
         self._out_box.bind("<<Modified>>", self._update_charcount)
 
@@ -1389,30 +895,23 @@ class PressConfStudio:
     # ══════════════════════════════════════════════════════════════════════════
     #  COLUMN 1 HANDLERS
     # ══════════════════════════════════════════════════════════════════════════
-    def _toggle_phone_mode(self):
-        if self._phone_mode.get():
-            if not HAS_PHONE_MIC:
-                messagebox.showwarning("缺少套件",
-                    "請先執行安裝程式安裝 flask 套件後再使用手機麥克風功能")
-                self._phone_mode.set(False)
-                return
+    def _set_phone_mode(self, on: bool):
+        """進入／離開手機麥克風分頁時啟停遠端麥克風伺服器。"""
+        if on:
+            self._phone_mode.set(True)
             ip  = _get_local_ip()
             url = f"https://{ip}:8765"
             self._phone_url_var.set(url)
             self._update_qr(url)
-            self._phone_frame.pack(fill="x", padx=8, pady=(0, 4),
-                                   after=self._r_dev)
-            self._dev_combo.configure(state="disabled")
             ensure_server_running()
             self._arm_phone_mic()
         else:
+            self._phone_mode.set(False)
             if self._transcriber:
                 self._transcriber.stop()
                 self._transcriber = None
             self._wave_stop()
             self._live_lbl.configure(text="", text_color=TEXT_SEC)
-            self._phone_frame.pack_forget()
-            self._dev_combo.configure(state="readonly")
 
     def _arm_phone_mic(self):
         if not HAS_PHONE_MIC or not HAS_MLX_WHISPER:
@@ -1473,7 +972,7 @@ class PressConfStudio:
             self._qr_label.configure(
                 image="",
                 text="（安裝 qrcode + Pillow 後可顯示 QR Code）",
-                font=FT_SM, fg=TEXT_SEC, bg=BG_INPUT)
+                font=FT_SM, fg=TEXT_SEC, bg=BG_PANEL)
 
     def _copy_phone_url(self):
         url = self._phone_url_var.get()
@@ -1521,14 +1020,6 @@ class PressConfStudio:
             self._col3_side_btn.configure(fg_color=COL_OUTPUT,
                                            text_color="#FFFFFF")
         self._update_charcount()
-
-    def _toggle_adv_settings(self):
-        if self._adv_frame.winfo_ismapped():
-            self._adv_frame.pack_forget()
-            self._adv_toggle_btn.configure(text="⚙ 進階設定 ▾")
-        else:
-            self._adv_frame.pack(fill="x")
-            self._adv_toggle_btn.configure(text="⚙ 進階設定 ▴")
 
     def _refresh_devices(self):
         if not HAS_SOUNDDEVICE:
@@ -1704,7 +1195,7 @@ class PressConfStudio:
             api_key = os.environ.get("ANTHROPIC_API_KEY", "")
         if not api_key:
             messagebox.showwarning("缺少 API Key",
-                                   "請在「進階設定」填入 Anthropic API Key")
+                                   "請在右上角「⚙ 設定」填入 Anthropic API Key")
             return
 
         # 組合背景資訊：受訪者 + 最近一次記者會名稱
@@ -1716,22 +1207,22 @@ class PressConfStudio:
             context_parts.append(f"記者會名稱：{self._last_scene}")
         context = "\n".join(context_parts)
 
-        self._correct_btn.configure(state="disabled", text="校正中...")
-        self._status("逐字稿校正中...")
+        self._correct_btn.configure(state="disabled", text="修正中...")
+        self._status("逐字稿錯字修正中...")
 
         def _done(corrected):
             def _ui():
                 self._transcript.delete("1.0", tk.END)
                 self._transcript.insert(tk.END, corrected)
-                self._correct_btn.configure(state="normal", text="校正")
-                self._status("逐字稿校正完成")
+                self._correct_btn.configure(state="normal", text="修正錯字")
+                self._status("逐字稿錯字修正完成")
             self.root.after(0, _ui)
 
         def _err(msg):
             def _ui():
-                self._correct_btn.configure(state="normal", text="校正")
-                self._status(f"校正失敗：{msg[:60]}")
-                messagebox.showerror("校正失敗", msg)
+                self._correct_btn.configure(state="normal", text="修正錯字")
+                self._status(f"修正失敗：{msg[:60]}")
+                messagebox.showerror("修正失敗", msg)
             self.root.after(0, _ui)
 
         claude_correct(text, api_key, _done, _err, context=context)
@@ -1749,7 +1240,7 @@ class PressConfStudio:
             api_key = os.environ.get("ANTHROPIC_API_KEY", "")
         if not api_key:
             messagebox.showwarning("缺少 API Key",
-                                   "請在「生成報導」分頁填入 Anthropic API Key")
+                                   "請在右上角「⚙ 設定」填入 Anthropic API Key")
             return
 
         self._trans_btn.configure(state="disabled", text="翻譯中...")
@@ -1759,13 +1250,13 @@ class PressConfStudio:
             def _ui():
                 self._transcript.delete("1.0", tk.END)
                 self._transcript.insert(tk.END, translated)
-                self._trans_btn.configure(state="normal", text="翻譯")
+                self._trans_btn.configure(state="normal", text="翻成中文")
                 self._status("逐字稿已翻譯為繁體中文")
             self.root.after(0, _ui)
 
         def _err(msg):
             def _ui():
-                self._trans_btn.configure(state="normal", text="翻譯")
+                self._trans_btn.configure(state="normal", text="翻成中文")
                 self._status(f"翻譯失敗：{msg[:60]}")
                 messagebox.showerror("翻譯失敗", msg)
             self.root.after(0, _ui)
@@ -1802,8 +1293,8 @@ class PressConfStudio:
         self._status("音檔轉錄中")
 
         path       = self._audio_file
-        model_name = self._audio_model_var.get()
-        language   = self._audio_lang_var.get()
+        model_name = self._wmodel_var.get()
+        language   = self._lang_var.get()
         if language == "auto": language = None
 
         def _set_lbl(msg, color=COL_INPUT):
@@ -1925,8 +1416,9 @@ class PressConfStudio:
 
     def _toggle_apikey_visibility(self):
         self._apikey_visible = not self._apikey_visible
-        self._apikey_entry.configure(
-            show="" if self._apikey_visible else "*")
+        ent = self._apikey_entry
+        if ent is not None and ent.winfo_exists():
+            ent.configure(show="" if self._apikey_visible else "*")
 
     def _save_prefs(self):
         data = {}
@@ -1945,6 +1437,107 @@ class PressConfStudio:
         else:
             data["author"] = ""
         save_config(data)
+
+    # ══════════════════════════════════════════════════════════════════════════
+    #  SETTINGS DIALOG（API Key / 模型 / 技能包 / Whisper）
+    # ══════════════════════════════════════════════════════════════════════════
+    def _open_settings(self):
+        win = self._settings_win
+        if win is not None and win.winfo_exists():
+            win.lift()
+            win.focus_force()
+            return
+
+        win = ctk.CTkToplevel(self.root)
+        self._settings_win = win
+        win.title("設定")
+        win.configure(fg_color=BG)
+        win.transient(self.root)
+        win.resizable(False, False)
+        x = self.root.winfo_rootx() + 100
+        y = self.root.winfo_rooty() + 80
+        win.geometry(f"560x440+{x}+{y}")
+
+        def _section(text):
+            ctk.CTkLabel(win, text=text, font=FT_BOLD,
+                         text_color=TEXT_PRI).pack(anchor="w",
+                                                   padx=16, pady=(16, 2))
+            ctk.CTkFrame(win, fg_color=BORDER, height=1
+                         ).pack(fill="x", padx=16, pady=(0, 4))
+
+        def _row(label):
+            r = ctk.CTkFrame(win, fg_color="transparent")
+            r.pack(fill="x", padx=16, pady=3)
+            ctk.CTkLabel(r, text=label, font=FT_SM, text_color=TEXT_SEC,
+                         width=60, anchor="w").pack(side="left")
+            return r
+
+        # ── Claude 寫稿 ────────────────────────────────────────────────────
+        _section("Claude 寫稿")
+
+        r = _row("API Key")
+        self._apikey_entry = ctk.CTkEntry(
+            r, textvariable=self._apikey_var,
+            show="" if self._apikey_visible else "*",
+            font=("Menlo", 9), fg_color=BG_INPUT, border_color=BORDER,
+            text_color=TEXT_PRI)
+        self._apikey_entry.pack(side="left", fill="x", expand=True, padx=(4, 4))
+        _add_entry_menu(self._apikey_entry)
+        self._ghost_btn(r, "顯示", self._toggle_apikey_visibility,
+                        width=36, height=24).pack(side="left")
+
+        r = _row("")
+        ctk.CTkCheckBox(r, text="記憶 API Key（儲存於 config.json）",
+                        font=FT_SM, text_color=TEXT_SEC,
+                        variable=self._remember_key,
+                        fg_color=BORDER, hover_color=BORDER_LT,
+                        checkmark_color=TEXT_PRI,
+                        command=self._save_prefs).pack(side="left", padx=4)
+
+        r = _row("模型")
+        self._make_combo(r, self._gen_model,
+                         ["claude-sonnet-4-6", "claude-opus-4-6",
+                          "claude-haiku-4-5-20251001"],
+                         width=240).pack(side="left", padx=(4, 0))
+
+        r = _row("技能包")
+        self._skill_lbl = ctk.CTkLabel(r, text="", font=FT_SM,
+                                       text_color=OK_FG, anchor="w")
+        self._skill_lbl.pack(side="left", fill="x", expand=True, padx=4)
+        self._ghost_btn(r, "選擇", self._browse_skill,
+                        width=36, height=24).pack(side="left")
+        self._update_skill_label()
+
+        # ── 語音轉錄 ───────────────────────────────────────────────────────
+        _section("語音轉錄（Whisper）")
+
+        r = _row("模型")
+        self._make_combo(r, self._wmodel_var, WHISPER_MODELS,
+                         width=160).pack(side="left", padx=(4, 16))
+        ctk.CTkLabel(r, text="語言", font=FT_SM,
+                     text_color=TEXT_SEC).pack(side="left")
+        self._make_combo(r, self._lang_var, LANGUAGES,
+                         width=80).pack(side="left", padx=(4, 0))
+
+        ctk.CTkLabel(win, text="現場錄音、手機麥克風與音檔轉錄共用此設定；"
+                               "首次選用新模型會自動下載（需網路）。",
+                     font=FT_SM, text_color=TEXT_DIM, anchor="w"
+                     ).pack(fill="x", padx=16, pady=(2, 0))
+
+        # ── 關閉 ───────────────────────────────────────────────────────────
+        def _close():
+            self._save_prefs()
+            self._skill_lbl    = None
+            self._apikey_entry = None
+            self._settings_win = None
+            win.destroy()
+
+        ctk.CTkButton(win, text="完成", height=34, font=FT_BOLD,
+                      fg_color=ACCENT_BLUE, hover_color="#4A7A9E",
+                      text_color="#FFFFFF", command=_close
+                      ).pack(side="bottom", fill="x", padx=16, pady=14)
+        win.protocol("WM_DELETE_WINDOW", _close)
+        win.after(80, win.lift)
 
     def _generate(self):
         if self._generating: return
@@ -2096,8 +1689,10 @@ class PressConfStudio:
                     self._mark_chk_btn.configure(state="disabled")
                     self._fix_chk_btn.configure(state="disabled")
                 else:
+                    self._chk_box.insert(tk.END,
+                        "（點擊問題文字可跳至稿件對應位置）\n", "sub")
                     fixable = 0
-                    for item in issues:
+                    for idx, item in enumerate(issues):
                         val  = item.get("value", "")
                         sug  = item.get("suggestion", "")
                         iss  = item.get("issue", "")
@@ -2108,8 +1703,18 @@ class PressConfStudio:
                             tag, prefix = "err", "不符"
                         else:
                             tag, prefix = "info", "無出處"
+                        jump_tag = f"jump_{idx}"
                         self._chk_box.insert(tk.END,
-                            f"[{prefix}]  「{val}」\n", tag)
+                            f"[{prefix}]  「{val}」\n", (tag, jump_tag))
+                        self._chk_box.tag_bind(
+                            jump_tag, "<Button-1>",
+                            lambda e, v=val: self._jump_to_issue(v))
+                        self._chk_box.tag_bind(
+                            jump_tag, "<Enter>",
+                            lambda e: self._chk_box.configure(cursor="hand2"))
+                        self._chk_box.tag_bind(
+                            jump_tag, "<Leave>",
+                            lambda e: self._chk_box.configure(cursor="xterm"))
                         if sug:
                             self._chk_box.insert(tk.END,
                                 f"  → 建議：{sug}\n", "ok")
@@ -2148,6 +1753,24 @@ class PressConfStudio:
 
         claude_check(article, source, self._apikey_var.get().strip(),
                      _res, _done, _err)
+
+    def _jump_to_issue(self, val: str):
+        """點擊查核結果中的問題文字，跳至最終稿件對應位置並短暫聚焦標記。"""
+        if not val:
+            return
+        if self._col3_active != "main":
+            self._col3_switch_tab("main")
+        pos = self._out_box.search(val, "1.0", tk.END)
+        if not pos:
+            self._status("稿件中找不到這段文字（可能已被修改）")
+            return
+        end = f"{pos}+{len(val)}c"
+        self._out_box.tag_remove("hl_focus", "1.0", tk.END)
+        self._out_box.tag_add("hl_focus", pos, end)
+        self._out_box.see(pos)
+        self.root.after(2500, lambda: self._out_box.tag_remove(
+            "hl_focus", "1.0", tk.END))
+        self._status("已跳至查核問題位置")
 
     def _mark_issues_in_final(self):
         """Step 1：在最終稿件中用顏色標記所有查核問題。"""
@@ -2228,14 +1851,14 @@ class PressConfStudio:
     # ── skill helpers ─────────────────────────────────────────────────────────
     def _update_skill_label(self):
         path = os.path.expanduser(self._skill_path_var.get())
-        exists = os.path.exists(path)
-        if exists:
+        if os.path.exists(path):
             name = os.path.splitext(os.path.basename(path))[0]
-            self._skill_lbl.configure(text=f"已載入  {name}",
-                                      text_color=OK_FG)
+            text, color = f"已載入  {name}", OK_FG
         else:
-            self._skill_lbl.configure(text="找不到技能包",
-                                      text_color=ERR_FG)
+            text, color = "找不到技能包", ERR_FG
+        lbl = self._skill_lbl
+        if lbl is not None and lbl.winfo_exists():
+            lbl.configure(text=text, text_color=color)
 
     def _browse_skill(self):
         path = filedialog.askopenfilename(
