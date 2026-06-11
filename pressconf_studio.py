@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 from __future__ import annotations
 """
-ULTRA SCOOP  v3.4
+ULTRA SCOOP  v3.4.1
 Mixer Layout: 輸入 → 處理 → 成稿
 v3.4: 介面簡化——設定集中至「⚙ 設定」對話框、輸入來源改為分頁切換、
       查核結果點擊跳轉、錄音備份自動清理
@@ -47,7 +47,7 @@ from text_utils import (parse_single_output, parse_dual_output, parse_file,
                         HAS_PDFPLUMBER, HAS_DOCX)
 from claude_api import (HAS_ANTHROPIC, claude_generate, claude_check,
                         claude_correct, claude_translate)
-from ui_helpers import _add_copy_menu, _add_entry_menu, _dark_text
+from ui_helpers import _add_copy_menu, _add_entry_menu, _dark_text, _select_all
 
 try:
     sys.path.insert(0, WHISPER_DIR)
@@ -90,7 +90,7 @@ def save_config(data: dict):
 class PressConfStudio:
     def __init__(self, root: ctk.CTk):
         self.root = root
-        root.title("ULTRA SCOOP  v3.4")
+        root.title("ULTRA SCOOP  v3.4.1")
         sw, sh = root.winfo_screenwidth(), root.winfo_screenheight()
         w = min(int(sw * 0.95), 1900)
         h = min(sh - 110, 1020)
@@ -229,6 +229,68 @@ class PressConfStudio:
         self.root.bind_all("<Command-s>",      lambda e: self._save_txt())
         self.root.bind_all("<Command-Return>", lambda e: self._generate())
         self.root.bind_all("<Command-comma>",  lambda e: self._open_settings())
+        # macOS：中文輸入法啟用或 Caps Lock 開啟時，keysym 會變形
+        # （'C'、'??' 等），上述依 keysym 比對的綁定全部失效。
+        # 此萬用攔截層在 keysym 變形時改用硬體鍵碼／char 判斷按鍵，
+        # 再走與選單列相同的 <<Copy>>/<<Paste>> 虛擬事件路徑。
+        self.root.bind_all("<Command-KeyPress>", self._cmd_key_fallback)
+
+    # 實體按鍵碼（不受輸入法／大小寫影響）；Tk 9 aqua：keycode >> 24
+    _MAC_VK = {0: "a", 1: "s", 5: "g", 7: "x", 8: "c", 9: "v",
+               40: "k", 36: "return", 43: "comma"}
+    # keysym 正常時交由原綁定處理，避免重複觸發
+    _HANDLED_KEYSYMS = {"a", "c", "v", "x", "g", "k", "s", "comma", "Return"}
+
+    def _vk_key(self, keycode: int):
+        if not keycode:
+            return None
+        if (keycode >> 16) & 0x80:
+            # Tk 9 aqua：keycode = (實體鍵碼 << 24) | 0x80____ | 字元碼。
+            # 實體鍵碼 0（A 鍵）需以低位元組為 ASCII 字母佐證，
+            # 排除修飾鍵本身（如 0x80F8FE，實體鍵碼也是 0）的誤判。
+            vk, low = keycode >> 24, keycode & 0xFFFF
+            if vk in self._MAC_VK and (vk or 0x41 <= low <= 0x7A):
+                return self._MAC_VK[vk]
+            return None
+        vk16 = keycode >> 16          # Tk 8.6 aqua：keycode = 實體鍵碼 << 16
+        if vk16 and vk16 in self._MAC_VK:
+            return self._MAC_VK[vk16]
+        return self._MAC_VK.get(keycode)
+
+    def _cmd_key_fallback(self, event):
+        if event.keysym in self._HANDLED_KEYSYMS:
+            return  # 正常路徑，原綁定已處理
+        ks, ch = event.keysym, event.char
+        if len(ks) == 1 and ks.isascii() and ks.isalpha():
+            key = ks.lower()                      # Caps Lock／Shift："C"
+        elif ch and len(ch) == 1 and ch.isascii() and ch.isalpha():
+            key = ch.lower()                      # keysym 壞掉但 char 正常
+        else:
+            key = self._vk_key(event.keycode)     # 輸入法：用硬體鍵碼
+        if key not in self._HANDLED_KEYSYMS and key != "return":
+            return
+        if key in ("c", "v", "x", "a"):
+            w = self.root.focus_get()
+            if w is None:
+                return "break"
+            if key == "a":
+                if isinstance(w, tk.Text):
+                    _select_all(w)
+                elif hasattr(w, "select_range"):
+                    w.select_range(0, tk.END)
+            else:
+                event_name = {"c": "<<Copy>>", "v": "<<Paste>>",
+                              "x": "<<Cut>>"}[key]
+                w.event_generate(event_name)
+        elif key in ("g", "return"):
+            self._generate()
+        elif key == "k":
+            self._verify()
+        elif key == "s":
+            self._save_txt()
+        elif key == "comma":
+            self._open_settings()
+        return "break"
 
     # ── UI building ───────────────────────────────────────────────────────────
     def _build_ui(self):
@@ -248,7 +310,7 @@ class PressConfStudio:
         ctk.CTkLabel(bar, text="SCOOP",
                      font=("Arial Black", 26),
                      text_color=ACCENT_AMBER).pack(side="left", padx=(0, 6))
-        ctk.CTkLabel(bar, text="v3.4",
+        ctk.CTkLabel(bar, text="v3.4.1",
                      font=("Menlo", 9), text_color=TEXT_DIM
                      ).pack(side="left", padx=(0, 16), pady=(10, 0))
 

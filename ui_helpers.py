@@ -23,10 +23,12 @@ def _add_copy_menu(widget):
         finally: menu.grab_release()
     widget.bind("<Button-2>",         _popup)
     widget.bind("<Control-Button-1>", _popup)
-    widget.bind("<Command-a>", lambda e: (_select_all(widget), "break"))
-    widget.bind("<Command-c>", lambda e: (widget.event_generate("<<Copy>>"),  "break"))
-    widget.bind("<Command-x>", lambda e: (widget.event_generate("<<Cut>>"),   "break"))
-    widget.bind("<Command-v>", lambda e: (widget.event_generate("<<Paste>>"), "break"))
+    # 注意：必須真的回傳字串 "break" 才能阻斷 Tk class 綁定，
+    # 否則 <<Paste>> 等會被處理兩次（widget 一次 + class 一次）
+    widget.bind("<Command-a>", lambda e: (_select_all(widget), "break")[1])
+    widget.bind("<Command-c>", lambda e: (widget.event_generate("<<Copy>>"),  "break")[1])
+    widget.bind("<Command-x>", lambda e: (widget.event_generate("<<Cut>>"),   "break")[1])
+    widget.bind("<Command-v>", lambda e: (widget.event_generate("<<Paste>>"), "break")[1])
 
 
 def _select_all(widget):
@@ -56,10 +58,11 @@ def _add_entry_menu(e: ctk.CTkEntry):
 
     inner.bind("<Button-2>",         _popup)
     inner.bind("<Control-Button-1>", _popup)
-    inner.bind("<Command-a>", lambda ev: (inner.select_range(0, tk.END), "break"))
-    inner.bind("<Command-c>", lambda ev: (inner.event_generate("<<Copy>>"),  "break"))
-    inner.bind("<Command-x>", lambda ev: (inner.event_generate("<<Cut>>"),   "break"))
-    inner.bind("<Command-v>", lambda ev: (inner.event_generate("<<Paste>>"), "break"))
+    # 同上：回傳字串 "break" 阻斷 class 綁定，避免雙重貼上
+    inner.bind("<Command-a>", lambda ev: (inner.select_range(0, tk.END), "break")[1])
+    inner.bind("<Command-c>", lambda ev: (inner.event_generate("<<Copy>>"),  "break")[1])
+    inner.bind("<Command-x>", lambda ev: (inner.event_generate("<<Cut>>"),   "break")[1])
+    inner.bind("<Command-v>", lambda ev: (inner.event_generate("<<Paste>>"), "break")[1])
 
 
 def _dark_text(parent, height=8, font=FT, **kwargs):
